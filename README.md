@@ -4,8 +4,8 @@ Unofficial Python client and CLI for the direct TCP interface used by the
 myTecnoalarm Android application. It does not use Tecnoalarm cloud, HTTP, or
 video services.
 
-> Experimental: the protocol was reverse-engineered and has not been tested on
-> every panel. Start with read-only commands. The protocol uses unauthenticated
+> Experimental: This project was developed with AI assistance. The protocol was reverse-engineered and has not been tested on
+> every hardware. Start with read-only commands. The protocol uses unauthenticated
 > AES-CFB; never expose TCP port 10001 to the Internet. Use a trusted LAN or VPN.
 
 ## Install
@@ -20,10 +20,10 @@ python3 -m pip install .
 cp .env.example .env
 # Edit .env with your credentials.
 
-tecnoctl 192.168.1.20 status
-tecnoctl 192.168.1.20 zones
-tecnoctl 192.168.1.20 arm 1
-tecnoctl 192.168.1.20 disarm 1
+tecnoctl HOST status
+tecnoctl HOST zones
+tecnoctl HOST arm 1
+tecnoctl HOST disarm 1
 ```
 
 The CLI loads `.env` automatically; exported variables take precedence. Run
