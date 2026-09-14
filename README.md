@@ -21,13 +21,25 @@ cp .env.example .env
 # Edit .env with your credentials.
 
 tecnoctl HOST status
+tecnoctl HOST --verbose status
+tecnoctl HOST --debug status
 tecnoctl HOST zones
+tecnoctl HOST watch
 tecnoctl HOST arm 1
 tecnoctl HOST disarm 1
 ```
 
 The CLI loads `.env` automatically; exported variables take precedence. Run
-`tecnoctl --help` for all commands. CLI IDs are one-based.
+`tecnoctl --help` for all commands. CLI IDs are one-based. `watch` connects,
+checks, and disconnects every 30 seconds, then prints JSON when an alarm starts,
+a program starts arming or becomes armed/disarmed, or connectivity changes. The
+minimum `--interval` is 5 seconds. Add `--debug` before any command for
+connection and protocol diagnostics, or `--verbose` for quieter connection
+status. 
+
+> `watch` is experimental and is not a primary alarm notification system. Some
+> panels accept only one direct TCP client, so each check may briefly delay the
+> official app.
 
 ## Python API
 
@@ -40,7 +52,8 @@ with AlarmClient("192.168.1.20", "network passphrase", "123456") as alarm:
 ```
 
 The class also exposes panel, program, remote, zone, permission, and event-log
-queries. See `AlarmClient` in `tecnoctl/client.py`.
+queries. `alarm.watch()` yields JSON-friendly alarm and connection events. See
+`AlarmClient` in `tecnoctl/client.py`.
 
 ## Development
 
