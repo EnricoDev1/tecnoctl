@@ -11,7 +11,7 @@ video services.
 ## Install
 
 ```sh
-python3 -m pip install .
+pip install tecnoctl
 ```
 
 ## CLI
@@ -60,6 +60,8 @@ queries. `alarm.watch()` yields JSON-friendly alarm and connection events. See
 ```sh
 python3 -m unittest discover -s tests
 ```
+
+Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 MIT licensed. Tecnoalarm is a trademark of its owner; this project is not
 affiliated with or endorsed by Tecnoalarm.
