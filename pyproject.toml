@@ -13,3 +13,7 @@ dependencies = ["cryptography>=47", "python-dotenv>=1"]
 
 [project.scripts]
 tecnoctl = "tecnoctl.cli:main"
+
+[project.urls]
+Repository = "https://github.com/EnricoDev1/tecnoctl"
+Issues = "https://github.com/EnricoDev1/tecnoctl/issues"
