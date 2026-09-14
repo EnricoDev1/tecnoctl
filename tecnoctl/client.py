@@ -1,6 +1,7 @@
 """Reusable client for the myTecnoalarm direct encrypted-TCP protocol."""
 
 from datetime import datetime, timedelta
+import logging
 import secrets
 import socket
 import struct
@@ -10,6 +11,8 @@ import uuid
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
 from cryptography.hazmat.decrepit.ciphers.modes import CFB
 
+
+logger = logging.getLogger(__name__)
 
 DLE, STX, ACK, RDY, NAK, BUSY = 0x10, 0x02, 0x06, 0x0C, 0x15, 0x0F
 BRIDGE_RECORD = 2304
@@ -46,6 +49,10 @@ RECORD_NAMES = {
     2316: "zone status", 2317: "program/remote status", 2318: "panel status",
     2319: "priority", 2320: "isolate zone", 2321: "reintegrate zone",
     2339: "Evolution remote description", 2340: "Evolution program/remote status",
+}
+PROGRAM_STATE_NAMES = {
+    0: "disarmed", 1: "pre_exit", 2: "exit", 3: "armed",
+    4: "partial_exit", 5: "partial", 6: "partial_end",
 }
 GENERAL_STATUS_BITS = (
     ("standby", "fault", "battery_alarm", "power_alarm", "tamper_active", "anomaly_active", "robbery_active", "technical_active"),
@@ -211,6 +218,12 @@ class AlarmClient:
         self.close()
 
     def connect(self):
+        logger.debug(
+            "connecting to %s:%d (timeout=%g seconds)",
+            self.host,
+            self.port,
+            self.timeout,
+        )
         try:
             self.session = 0
             self.clock = b""
@@ -218,6 +231,7 @@ class AlarmClient:
             self.rx.clear()
             self.sock = socket.create_connection((self.host, self.port), self.timeout)
             self.sock.settimeout(self.timeout)
+            logger.debug("TCP connection established; starting encrypted handshake")
             iv = secrets.token_bytes(16)
             cipher = Cipher(algorithms.AES(self.key), CFB(iv))
             self.encryptor, self.decryptor = cipher.encryptor(), cipher.decryptor()
@@ -231,6 +245,7 @@ class AlarmClient:
                     "clock handshake (record 1) failed: "
                     f"{exc}; check the direct-TCP port and network passphrase"
                 ) from exc
+            logger.debug("clock handshake succeeded")
             auth = bytearray(48)
             auth[:2] = self.app_id.to_bytes(2, "little")
             auth[2 : 2 + len(self.code)] = bytes(map(int, self.code))
@@ -249,8 +264,15 @@ class AlarmClient:
                     "and user permissions"
                 )
             self.session = int.from_bytes(response[1:3], "little")
+            logger.info(
+                "connected to %s:%d; authenticated session=%d",
+                self.host,
+                self.port,
+                self.session,
+            )
             return self
-        except Exception:
+        except Exception as exc:
+            logger.info("connection failed: %s", exc)
             self.close()
             raise
 
@@ -258,8 +280,18 @@ class AlarmClient:
         if self.sock is not None:
             self.sock.close()
             self.sock = None
+            logger.debug("connection closed")
 
     def _exchange(self, record, index=0, payload=b"", expected_length=0):
+        name = RECORD_NAMES.get(record, "unknown")
+        started = time.monotonic()
+        logger.debug(
+            "requesting %s (record=%d index=%d payload=%d bytes)",
+            name,
+            record,
+            index,
+            len(payload),
+        )
         try:
             frame = _bridge_frame(STX, self.session, record, index, bytes(payload))
             self.sock.sendall(self.encryptor.update(_stuff(frame)))
@@ -268,15 +300,29 @@ class AlarmClient:
                 if complete is not None:
                     response, consumed = complete
                     del self.rx[:consumed]
-                    return _parse_response(
+                    result = _parse_response(
                         response, self.session, record, index, expected_length
                     )
+                    logger.debug(
+                        "received %s (record=%d index=%d response=%d bytes) in %.3fs",
+                        name,
+                        record,
+                        index,
+                        len(result),
+                        time.monotonic() - started,
+                    )
+                    return result
                 chunk = self.sock.recv(4096)
                 if not chunk:
                     raise ProtocolError("alarm closed the connection")
                 self.rx.extend(self.decryptor.update(chunk))
         except (OSError, ProtocolError) as exc:
-            name = RECORD_NAMES.get(record, "unknown")
+            logger.debug(
+                "%s request failed after %.3fs: %s",
+                name,
+                time.monotonic() - started,
+                exc,
+            )
             raise ProtocolError(
                 f"{name} request (record {record}, index {index}) failed: {exc}"
             ) from exc
@@ -371,16 +417,25 @@ class AlarmClient:
             "programs": [
                 {
                     "program": i + 1,
-                    "state": data[program_offset + i] & 0x0F,
+                    "state": value & 0x0F,
+                    "state_name": PROGRAM_STATE_NAMES.get(value & 0x0F, "unknown"),
                     "state_group": (
-                        "disarmed" if (data[program_offset + i] & 0x0F) == 0
-                        else "partial" if (data[program_offset + i] & 0x0F) in (4, 5)
+                        "disarmed" if (value & 0x0F) == 0
+                        else "partial" if (value & 0x0F) in (4, 5)
                         else "armed-or-transition"
                     ),
-                    "armed": (data[program_offset + i] & 0x0F) != 0,
-                    "flags": data[program_offset + i] & 0xF0,
+                    "armed": (value & 0x0F) != 0,
+                    "prealarm": bool(value & 0x10),
+                    "alarm": bool(value & 0x20),
+                    "alarm_memory": bool(value & 0x40),
+                    "flags": value & 0xF0,
                 }
-                for i in range(min(program_count, profile["max_programs"]))
+                for i, value in enumerate(
+                    data[
+                        program_offset : program_offset
+                        + min(program_count, profile["max_programs"])
+                    ]
+                )
             ],
             "remotes": [
                 {"remote": i + 1, "on": bool(remote_bits & (1 << i))}
@@ -567,6 +622,148 @@ class AlarmClient:
             "status": self.panel_status(),
             **self.group_status(),
         }
+
+    def watch(self, interval=30.0, reconnect_delay=30.0, wait=None):
+        """Yield alarm and connection events, closing the panel between polls."""
+        if not 5 <= interval < float("inf"):
+            raise ValueError("watch interval must be at least 5 seconds")
+        if not 5 <= reconnect_delay < float("inf"):
+            raise ValueError("reconnect delay must be at least 5 seconds")
+        if self.sock is None:
+            self.connect()
+        wait = wait or time.sleep
+
+        previous = None
+        disconnected = False
+        while True:
+            pending = []
+            delay = interval
+            try:
+                if self.sock is None:
+                    self.connect()
+                group = self.group_status()
+                programs = group["programs"]
+                started = []
+                state_changes = []
+                changes = []
+                if previous is not None:
+                    for program in programs:
+                        before = previous.get(program["program"], {})
+                        detected_by = [
+                            name
+                            for name in ("alarm", "alarm_memory")
+                            if program[name] and not before.get(name, False)
+                        ]
+                        if detected_by:
+                            started.append((program, detected_by))
+                        state = program["state"]
+                        before_state = before.get("state")
+                        if state != before_state:
+                            changes.append(
+                                f"program {program['program']} "
+                                f"{PROGRAM_STATE_NAMES.get(before_state, 'unknown')}"
+                                f"({before_state}) -> {program['state_name']}({state}), "
+                                f"flags=0x{program['flags']:02x}"
+                            )
+                            if before_state == 0 and state in (1, 2, 4):
+                                state_changes.append(
+                                    ("program_arming", program, before_state)
+                                )
+                            elif state in (3, 5, 6):
+                                state_changes.append(
+                                    ("program_armed", program, before_state)
+                                )
+                            elif state == 0:
+                                state_changes.append(
+                                    ("program_disarmed", program, before_state)
+                                )
+                panel = self.panel_status()["general"] if started else None
+                log = self.events(1)["events"] if started else []
+                if previous is None:
+                    active = [
+                        f"program {program['program']} {program['state_name']}"
+                        f"({program['state']}) flags=0x{program['flags']:02x}"
+                        for program in programs
+                        if program["state"] or program["flags"]
+                    ]
+                    poll_result = "baseline: " + (
+                        "; ".join(active) or "all programs disarmed"
+                    )
+                else:
+                    poll_result = "; ".join(changes) or "no program changes"
+                poll_logger = (
+                    logger.info
+                    if previous is None or changes or started
+                    else logger.debug
+                )
+                poll_logger(
+                    "watch poll succeeded: %s; next request in %g seconds",
+                    poll_result,
+                    interval,
+                )
+            except (OSError, ProtocolError) as exc:
+                if not disconnected:
+                    pending.append(
+                        {
+                            "type": "connection_lost",
+                            "timestamp": datetime.now()
+                            .astimezone()
+                            .isoformat(timespec="seconds"),
+                            "error": str(exc),
+                        }
+                    )
+                disconnected = True
+                delay = reconnect_delay
+                logger.info(
+                    "watch poll failed: %s; next request in %g seconds",
+                    exc,
+                    reconnect_delay,
+                )
+            else:
+                timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+                if disconnected:
+                    pending.append(
+                        {"type": "connection_restored", "timestamp": timestamp}
+                    )
+                    disconnected = False
+                for program, detected_by in started:
+                    pending.append(
+                        {
+                            "type": "alarm",
+                            "timestamp": timestamp,
+                            "program": program["program"],
+                            "detected_by": detected_by,
+                            "program_status": program,
+                            "panel_status": panel,
+                            "latest_event": log[0] if log else None,
+                        }
+                    )
+                for event_type, program, before_state in state_changes:
+                    pending.append(
+                        {
+                            "type": event_type,
+                            "timestamp": timestamp,
+                            "program": program["program"],
+                            "previous_state": before_state,
+                            "previous_state_name": PROGRAM_STATE_NAMES.get(
+                                before_state, "unknown"
+                            ),
+                            "mode": (
+                                "partial"
+                                if program["state"] in (4, 5)
+                                else "full"
+                                if program["state"] in (1, 2, 3, 6)
+                                else None
+                            ),
+                            "program_status": program,
+                        }
+                    )
+                previous = {program["program"]: program for program in programs}
+            finally:
+                self.close()
+
+            yield from pending
+            wait(delay)
 
     @staticmethod
     def _operation_payload(action, target, session, open_zones=()):

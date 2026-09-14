@@ -65,9 +65,12 @@ class ProtocolTest(unittest.TestCase):
         transport.sock = FakeSocket()
         transport.encryptor = Cipher(algorithms.AES(key), CFB(iv)).encryptor()
         transport.decryptor = Cipher(algorithms.AES(key), CFB(iv)).decryptor()
-        self.assertEqual(
-            transport._exchange(2318, expected_length=16), response_payload
-        )
+        with self.assertLogs("tecnoctl.client", level="DEBUG") as request_logs:
+            self.assertEqual(
+                transport._exchange(2318, expected_length=16), response_payload
+            )
+        self.assertIn("requesting panel status", "\n".join(request_logs.output))
+        self.assertIn("response=16 bytes", "\n".join(request_logs.output))
         request_wire = (
             Cipher(algorithms.AES(key), CFB(iv))
             .decryptor()
@@ -83,11 +86,18 @@ class ProtocolTest(unittest.TestCase):
 
         def fake_exchange(record, index=0, payload=b"", expected_length=0):
             calls.append((record, index, bytes(payload), expected_length))
-            return bytes(expected_length)
+            data = bytearray(expected_length)
+            if record == 2340:
+                data[32] = 0x70
+            return bytes(data)
 
         panel._exchange = fake_exchange
         self.assertEqual(panel.profile()["max_zones"], 50)
-        self.assertEqual(len(panel.group_status()["remotes"]), 32)
+        group = panel.group_status()
+        self.assertEqual(len(group["remotes"]), 32)
+        self.assertTrue(group["programs"][0]["prealarm"])
+        self.assertTrue(group["programs"][0]["alarm"])
+        self.assertTrue(group["programs"][0]["alarm_memory"])
         self.assertEqual(calls[-1][0], 2340)
         panel._info = bytes((42, 5)) + bytes(14)
         self.assertEqual(panel._description("zone", 0), "Z1")
@@ -100,6 +110,87 @@ class ProtocolTest(unittest.TestCase):
         operation = panel._operation_payload(3, 2, 1, (4, 5))
         self.assertEqual(operation[:8], b"\x03\x02\x00\x00\x01\x00\x0e\x20")
         self.assertEqual(operation[10:14], b"\x04\x00\x05\x00")
+
+    def test_alarm_watch(self):
+        panel = object.__new__(AlarmClient)
+        panel.sock = object()
+        statuses = iter(
+            [
+                [
+                    {
+                        "program": 1,
+                        "state": 0,
+                        "state_name": "disarmed",
+                        "alarm": False,
+                        "alarm_memory": False,
+                        "flags": 0,
+                    }
+                ],
+                [
+                    {
+                        "program": 1,
+                        "state": 1,
+                        "state_name": "pre_exit",
+                        "alarm": False,
+                        "alarm_memory": False,
+                        "flags": 0,
+                    }
+                ],
+                [
+                    {
+                        "program": 1,
+                        "state": 6,
+                        "state_name": "partial_end",
+                        "alarm": True,
+                        "alarm_memory": True,
+                        "flags": 0,
+                    }
+                ],
+                [
+                    {
+                        "program": 1,
+                        "state": 0,
+                        "state_name": "disarmed",
+                        "alarm": False,
+                        "alarm_memory": True,
+                        "flags": 0,
+                    }
+                ],
+            ]
+        )
+        panel.group_status = lambda: {"programs": next(statuses), "raw": "00"}
+        panel.panel_status = lambda: {"general": {"alarm": True}}
+        panel.events = lambda limit: {"events": [{"event": 1}]}
+        panel.connect = lambda: setattr(panel, "sock", object()) or panel
+        panel.close = lambda: setattr(panel, "sock", None)
+
+        waits = []
+        with self.assertLogs("tecnoctl.client", level="DEBUG") as logs:
+            watcher = panel.watch(wait=waits.append)
+            arming = next(watcher)
+            event = next(watcher)
+            armed = next(watcher)
+            disarmed = next(watcher)
+
+        self.assertEqual(arming["type"], "program_arming")
+        self.assertEqual(arming["mode"], "full")
+        self.assertEqual(arming["previous_state_name"], "disarmed")
+        self.assertEqual(event["type"], "alarm")
+        self.assertEqual(event["program"], 1)
+        self.assertEqual(event["detected_by"], ["alarm", "alarm_memory"])
+        self.assertTrue(event["panel_status"]["alarm"])
+        self.assertIsNone(panel.sock)
+        self.assertEqual(armed["type"], "program_armed")
+        self.assertEqual(armed["mode"], "full")
+        self.assertEqual(disarmed["type"], "program_disarmed")
+        self.assertIsNone(disarmed["mode"])
+        self.assertEqual(waits, [30.0, 30.0, 30.0])
+        self.assertIn(
+            "program 1 disarmed(0) -> pre_exit(1)", "\n".join(logs.output)
+        )
+
+        with self.assertRaisesRegex(ValueError, "at least 5 seconds"):
+            next(panel.watch(interval=1))
 
 
 if __name__ == "__main__":

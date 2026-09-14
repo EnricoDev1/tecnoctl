@@ -3,7 +3,11 @@
 import argparse
 import getpass
 import json
+import logging
+import math
 import os
+import sys
+import time
 
 from dotenv import load_dotenv
 
@@ -52,6 +56,37 @@ def _nonnegative(value):
     return number
 
 
+def _watch_interval(value):
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if not 5 <= number < float("inf"):
+        raise argparse.ArgumentTypeError("must be at least 5 seconds")
+    return number
+
+
+def _clear_status_line():
+    if sys.stderr.isatty():
+        print("\r\033[2K", end="", file=sys.stderr, flush=True)
+
+
+def _countdown(seconds):
+    if not sys.stderr.isatty():
+        time.sleep(seconds)
+        return
+    deadline = time.monotonic() + seconds
+    while (remaining := deadline - time.monotonic()) > 0:
+        print(
+            f"\r\033[2Knext request in {math.ceil(remaining)} s",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        time.sleep(min(1, remaining))
+    _clear_status_line()
+
+
 def _parser():
     parser = argparse.ArgumentParser(
         description="Control a Tecnoalarm panel over direct TCP"
@@ -59,6 +94,12 @@ def _parser():
     parser.add_argument("host", help="panel hostname or IP address")
     parser.add_argument("--port", type=int, default=10001)
     parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument(
+        "--debug", action="store_true", help="log connection and protocol diagnostics"
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="log connection status"
+    )
     parser.add_argument(
         "--app-id",
         type=_app_id,
@@ -88,6 +129,23 @@ def _parser():
     code_names.add_argument("--count", type=_positive)
     events = commands.add_parser("events", help="event log; use --limit 0 for all")
     events.add_argument("--limit", type=_nonnegative, default=50)
+    watch = commands.add_parser(
+        "watch", help="print alarm and program-state events as JSON lines"
+    )
+    watch.add_argument("--interval", type=_watch_interval, default=30.0)
+    watch.add_argument(
+        "--debug",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="log connection, protocol, and poll diagnostics",
+    )
+    watch.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="log connection status and meaningful poll activity",
+    )
     commands.add_parser("sync", help="full configuration and status synchronization")
     open_zones = commands.add_parser("open-zones", help="open zones blocking a program")
     open_zones.add_argument("program", type=_one_based)
@@ -115,6 +173,13 @@ def main():
     load_dotenv(".env")
     parser = _parser()
     args = parser.parse_args()
+    log_level = logging.DEBUG if args.debug else logging.INFO if args.verbose else None
+    if log_level is not None:
+        logging.basicConfig(
+            level=log_level,
+            format="%(asctime)s %(levelname)s %(message)s",
+            datefmt="%H:%M:%S",
+        )
     passphrase = args.passphrase or os.getenv("TECNOCTL_PASSPHRASE")
     code = args.code or os.getenv("TECNOCTL_CODE")
     if passphrase is None:
@@ -123,14 +188,32 @@ def main():
         code = getpass.getpass("Access code: ")
 
     try:
-        with AlarmClient(
+        client = AlarmClient(
             args.host,
             passphrase,
             code,
             port=args.port,
             app_id=args.app_id,
             timeout=args.timeout,
-        ) as alarm:
+        )
+        if args.command == "watch":
+            print(
+                f"watching {args.host}:{args.port} every {args.interval:g} seconds; "
+                "Ctrl-C to stop",
+                file=sys.stderr,
+            )
+            try:
+                for event in client.watch(args.interval, wait=_countdown):
+                    _clear_status_line()
+                    print(json.dumps(event), flush=True)
+            except KeyboardInterrupt:
+                pass
+            finally:
+                _clear_status_line()
+                client.close()
+            return
+
+        with client as alarm:
             if args.command == "info":
                 result = alarm.panel_info()
             elif args.command == "clock":
