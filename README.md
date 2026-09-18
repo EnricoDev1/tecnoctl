@@ -25,8 +25,8 @@ tecnoctl HOST --verbose status
 tecnoctl HOST --debug status
 tecnoctl HOST zones
 tecnoctl HOST watch
-tecnoctl HOST arm 1
-tecnoctl HOST disarm 1
+tecnoctl HOST arm 1 2 --exclude-open
+tecnoctl HOST disarm 1 2
 ```
 
 The CLI loads `.env` automatically; exported variables take precedence. Run
@@ -35,7 +35,8 @@ checks, and disconnects every 30 seconds, then prints JSON when an alarm starts,
 a program starts arming or becomes armed/disarmed, or connectivity changes. The
 minimum `--interval` is 5 seconds. Add `--debug` before any command for
 connection and protocol diagnostics, or `--verbose` for quieter connection
-status. 
+status. `arm` and `disarm` accept multiple program IDs and stop at the first
+failure.
 
 > `watch` is experimental and is not a primary alarm notification system. Some
 > panels accept only one direct TCP client, so each check may briefly delay the

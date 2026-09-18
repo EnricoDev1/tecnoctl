@@ -1,4 +1,6 @@
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
 from cryptography.hazmat.decrepit.ciphers.modes import CFB
@@ -6,6 +8,7 @@ from cryptography.hazmat.decrepit.ciphers.modes import CFB
 from tecnoctl.client import (
     AlarmClient,
     MODEL_LIMITS,
+    ProtocolError,
     RDY,
     STX,
     _bridge_frame,
@@ -14,9 +17,55 @@ from tecnoctl.client import (
     _stuff,
     _take_frame,
 )
+from tecnoctl.cli import _parser, _run_action
 
 
 class ProtocolTest(unittest.TestCase):
+    def test_cli_program_actions(self):
+        alarm = type("Alarm", (), {})()
+        alarm.calls = []
+        alarm.arm = lambda program, exclude: (
+            alarm.calls.append(("arm", program, exclude)) or ([17] if program == 2 else [])
+        )
+        alarm.disarm = lambda program: alarm.calls.append(("disarm", program))
+
+        output = StringIO()
+        with redirect_stdout(output):
+            _run_action(
+                alarm,
+                _parser().parse_args(
+                    ["panel", "arm", "1", "3", "1", "--exclude-open"]
+                ),
+            )
+            _run_action(
+                alarm,
+                _parser().parse_args(["panel", "disarm", "3", "1"]),
+            )
+
+        self.assertEqual(
+            alarm.calls,
+            [("arm", 0, True), ("arm", 2, True), ("disarm", 2), ("disarm", 0)],
+        )
+        self.assertEqual(
+            output.getvalue().splitlines(),
+            [
+                "program 1 armed",
+                "program 3 armed; excluded zones 18",
+                "program 3 disarmed",
+                "program 1 disarmed",
+            ],
+        )
+
+        def reject(_program, _exclude):
+            raise ProtocolError("rejected")
+
+        alarm.arm = reject
+        with self.assertRaisesRegex(ProtocolError, "program 2: rejected"):
+            _run_action(
+                alarm,
+                _parser().parse_args(["panel", "arm", "2", "3"]),
+            )
+
     def test_offline_protocol_and_decoders(self):
         self.assertEqual(_crc16(b"123456789"), 0x4B37)
         for model, (programs, remotes, *_limits) in MODEL_LIMITS.items():

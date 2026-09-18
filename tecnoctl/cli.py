@@ -149,11 +149,11 @@ def _parser():
     commands.add_parser("sync", help="full configuration and status synchronization")
     open_zones = commands.add_parser("open-zones", help="open zones blocking a program")
     open_zones.add_argument("program", type=_one_based)
-    arm = commands.add_parser("arm", help="arm a program")
-    arm.add_argument("program", type=_one_based)
+    arm = commands.add_parser("arm", help="arm one or more programs")
+    arm.add_argument("programs", nargs="+", type=_one_based, metavar="PROGRAM")
     arm.add_argument("--exclude-open", action="store_true")
-    disarm = commands.add_parser("disarm", help="disarm a program")
-    disarm.add_argument("program", type=_one_based)
+    disarm = commands.add_parser("disarm", help="disarm one or more programs")
+    disarm.add_argument("programs", nargs="+", type=_one_based, metavar="PROGRAM")
     remote_on = commands.add_parser("remote-on", help="turn a remote control on")
     remote_on.add_argument("remote", type=_one_based)
     remote_off = commands.add_parser("remote-off", help="turn a remote control off")
@@ -251,17 +251,22 @@ def main():
 
 
 def _run_action(alarm, args):
-    if args.command == "arm":
-        excluded = alarm.arm(args.program, args.exclude_open)
-        suffix = (
-            f"; excluded zones {', '.join(str(zone + 1) for zone in excluded)}"
-            if excluded
-            else ""
-        )
-        print(f"program {args.program + 1} armed{suffix}")
-    elif args.command == "disarm":
-        alarm.disarm(args.program)
-        print(f"program {args.program + 1} disarmed")
+    if args.command in ("arm", "disarm"):
+        for program in dict.fromkeys(args.programs):
+            try:
+                if args.command == "arm":
+                    excluded = alarm.arm(program, args.exclude_open)
+                    suffix = (
+                        f"; excluded zones {', '.join(str(zone + 1) for zone in excluded)}"
+                        if excluded
+                        else ""
+                    )
+                    print(f"program {program + 1} armed{suffix}", flush=True)
+                else:
+                    alarm.disarm(program)
+                    print(f"program {program + 1} disarmed", flush=True)
+            except (OSError, ProtocolError, ValueError) as exc:
+                raise ProtocolError(f"program {program + 1}: {exc}") from exc
     elif args.command in ("remote-on", "remote-off"):
         enabled = args.command == "remote-on"
         alarm.remote(args.remote, enabled)
